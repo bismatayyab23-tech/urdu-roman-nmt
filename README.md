@@ -1,7 +1,7 @@
-Urdu to Roman Urdu Neural Machine Translation (NMT)
+# Urdu to Roman Urdu Neural Machine Translation (NMT)
 This repository contains a complete Neural Machine Translation (NMT) system for transliterating Urdu text (written in Perso-Arabic script) into Roman Urdu (using the Latin alphabet). The project implements a character-level Sequence-to-Sequence (Seq2Seq) model with a Bidirectional LSTM (BiLSTM) encoder and a multi-layer LSTM decoder, trained on a parallel corpus of Urdu and Roman Urdu text.
 
-📋 Table of Contents
+Table of Contents
 Project Overview
 
 Model Architecture
@@ -24,7 +24,7 @@ Project Structure
 
 License
 
-🎯 Project Overview
+ Project Overview
 This project implements a character-level neural machine translation system that converts Urdu script to its Romanized equivalent. The model follows the encoder-decoder paradigm with attention mechanisms and is implemented in PyTorch.
 
 Key Features:
@@ -39,7 +39,7 @@ Multiple experiment configurations
 
 Streamlit web app for deployment
 
-🏗️ Model Architecture
+ Model Architecture
 text
 Encoder: 2-layer Bidirectional LSTM
   ├── Embedding Layer (vocab_size → embed_dim)
@@ -55,7 +55,7 @@ Decoder: 4-layer LSTM
   └── Linear Output Layer (hidden_dim×2 → vocab_size)
 
 Training: Teacher forcing (ratio=0.5), Adam optimizer, Cross-entropy loss
-📊 Dataset
+Dataset
 The model is trained on a parallel corpus of Urdu and Roman Urdu text containing 1,314 sentence pairs. The data is split as follows:
 
 Training set: 50% (657 samples)
@@ -74,7 +74,7 @@ Character-level tokenization with special tokens (<sos>, <eos>, <pad>, <unk>)
 
 Maximum sequence length: 50 characters
 
-⚙️ Installation
+ Installation
 Prerequisites
 Python 3.7+
 
@@ -91,7 +91,7 @@ cd urdu-roman-nmt
 pip install torch torchvision torchaudio
 pip install pandas numpy scikit-learn nltk editdistance matplotlib
 pip install streamlit  # For web app deployment
-🚀 Usage
+ Usage
 Quick Translation
 
 from model import SimpleSeq2Seq, translate_sentence
@@ -127,7 +127,7 @@ Evaluation and visualization
 
 Experiment tracking
 
-🏋️ Training
+ Training
 Hyperparameter Experiments
 Three experiment configurations were tested:
 
@@ -142,7 +142,7 @@ jupyter notebook URDU_ROMAN.ipynb
 
 # Or run as Python script (if converted)
 python train.py --config config_small.json
-📈 Evaluation Metrics
+ Evaluation Metrics
 The model is evaluated using three standard NLP metrics:
 
 BLEU Score: Measures translation quality by comparing n-gram overlap
@@ -158,7 +158,7 @@ Medium (256/512)	0.0000	1.0000	15.35	2.7313
 Large (512/512)	Results pending	Results pending	Results pending	Results pending
 *Note: The current BLEU scores of 0.0000 indicate the model is not generating meaningful translations yet, which is common in early training stages or with challenging character-level tasks.*
 
-📊 Results
+ Results
 Training Progress
 Loss decreases consistently across epochs
 
@@ -183,7 +183,7 @@ Ground Truth: "mauj e gul mauj e saba mauj e sahar lagti hai"
 
 Model Output: (To be generated after more training)
 
-🌐 Deployment
+ Deployment
 Streamlit Web Application
 A ready-to-deploy Streamlit web app is included in the notebook (Cell 15). To deploy:
 
@@ -234,7 +234,7 @@ def translate():
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
-📁 Project Structure
+ Project Structure
 text
 urdu-roman-nmt/
 ├── URDU_ROMAN.ipynb          # Main Jupyter notebook
@@ -261,7 +261,7 @@ Matplotlib: Visualization
 
 Streamlit: Web app deployment
 
-🔮 Future Improvements
+ Future Improvements
 Model Architecture:
 
 Add attention mechanism
@@ -294,7 +294,7 @@ More comprehensive error analysis
 
 Domain-specific evaluation metrics
 
-👥 Contributing
+ Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 Fork the repository
@@ -307,8 +307,7 @@ Push to the branch (git push origin feature/AmazingFeature)
 
 Open a Pull Request
 
-📝 License
-This project is licensed under the MIT License - see the LICENSE file for details.
+
 
 🙏 Acknowledgments
 The Urdu language processing community
