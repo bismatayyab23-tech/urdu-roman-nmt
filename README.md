@@ -1,7 +1,7 @@
 # Urdu to Roman Urdu Neural Machine Translation (NMT)
 This repository contains a complete Neural Machine Translation (NMT) system for transliterating Urdu text (written in Perso-Arabic script) into Roman Urdu (using the Latin alphabet). The project implements a character-level Sequence-to-Sequence (Seq2Seq) model with a Bidirectional LSTM (BiLSTM) encoder and a multi-layer LSTM decoder, trained on a parallel corpus of Urdu and Roman Urdu text.
 
-Table of Contents
+# Table of Contents
 Project Overview
 
 Model Architecture
@@ -24,7 +24,7 @@ Project Structure
 
 License
 
- Project Overview
+ # Project Overview
 This project implements a character-level neural machine translation system that converts Urdu script to its Romanized equivalent. The model follows the encoder-decoder paradigm with attention mechanisms and is implemented in PyTorch.
 
 Key Features:
