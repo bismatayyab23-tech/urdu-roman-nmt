@@ -246,7 +246,7 @@ urdu-roman-nmt/
 ├── best_model.pth           # Trained model checkpoint
 ├── experiment_results.json  # Experiment results
 └── training_results.png     # Training visualization
-📚 Dependencies
+ Dependencies
 PyTorch: Deep learning framework
 
 Pandas & NumPy: Data manipulation
@@ -309,7 +309,7 @@ Open a Pull Request
 
 
 
-🙏 Acknowledgments
+ Acknowledgments
 The Urdu language processing community
 
 PyTorch development team
