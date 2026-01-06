@@ -1,192 +1,517 @@
-# app.py
-import os
-import math
-import json
 import streamlit as st
 import torch
 import torch.nn as nn
-from tokenizers import ByteLevelBPETokenizer
+import pickle
+import re
+import numpy as np
+import json
+import os
 
-# --------- SETTINGS: update if your train hyperparams differ ----------
-# If you saved model_hyperparams.json, the code will try to read it.
-HP_JSON = "model_hyperparams.json"
-if os.path.exists(HP_JSON):
-    with open(HP_JSON, "r") as f:
-        hp = json.load(f)
-    EMBEDDING_DIM = hp.get("EMBEDDING_DIM", 256)
-    ENC_HID_DIM = hp.get("ENC_HID_DIM", 256)
-    DEC_HID_DIM = hp.get("DEC_HID_DIM", ENC_HID_DIM*2)
-    ENC_LAYERS = hp.get("ENC_LAYERS", 2)
-    DEC_LAYERS = hp.get("DEC_LAYERS", 4)
-    MAX_LEN_SRC = hp.get("MAX_LEN_SRC", 50)
-    MAX_LEN_TGT = hp.get("MAX_LEN_TGT", 50)
-else:
-    # Default values (change to the ones you trained with if different)
-    EMBEDDING_DIM = 256
-    ENC_HID_DIM = 256
-    DEC_HID_DIM = ENC_HID_DIM * 2
-    ENC_LAYERS = 2
-    DEC_LAYERS = 4
-    MAX_LEN_SRC = 50
-    MAX_LEN_TGT = 50
+# Set page config
+st.set_page_config(
+    page_title="Urdu to Roman Urdu Translator",
+    page_icon="🕌",
+    layout="wide"
+)
 
-MODEL_PATH = "best_model.pt"
-TOKENIZER_ROMAN_VOCAB = "tokenizers/roman/vocab.json"
-TOKENIZER_ROMAN_MERGES = "tokenizers/roman/merges.txt"
-TOKENIZER_URDU_VOCAB = "tokenizers/urdu/vocab.json"
-TOKENIZER_URDU_MERGES = "tokenizers/urdu/merges.txt"
+# Custom CSS for better styling
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        color: #1E3A8A;
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+    .sub-header {
+        font-size: 1.2rem;
+        color: #4B5563;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .result-box {
+        background-color: #F3F4F6;
+        padding: 1.5rem;
+        border-radius: 10px;
+        border-left: 5px solid #3B82F6;
+        margin: 1rem 0;
+    }
+    .metric-box {
+        background-color: #EFF6FF;
+        padding: 1rem;
+        border-radius: 8px;
+        text-align: center;
+        margin: 0.5rem;
+    }
+    .example-button {
+        margin: 0.2rem;
+        font-size: 0.9rem;
+    }
+    .stButton button {
+        width: 100%;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Title
+st.markdown('<h1 class="main-header">🕌 Urdu to Roman Urdu Translator</h1>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Neural Machine Translation using BiLSTM Encoder-Decoder</p>', unsafe_allow_html=True)
 
-# --------- Model classes (must match your training architecture) ----------
-class Encoder(nn.Module):
-    def __init__(self, input_dim, emb_dim, enc_hid_dim, enc_layers, dropout, pad_idx):
-        super().__init__()
-        self.embedding = nn.Embedding(input_dim, emb_dim, padding_idx=pad_idx)
-        self.lstm = nn.LSTM(emb_dim, enc_hid_dim, num_layers=enc_layers,
-                            bidirectional=True, batch_first=True,
-                            dropout=dropout if enc_layers>1 else 0.0)
-    def forward(self, src):
-        embedded = self.embedding(src)
-        outputs, (hidden, cell) = self.lstm(embedded)
-        return outputs, hidden, cell
-
-class Decoder(nn.Module):
-    def __init__(self, output_dim, emb_dim, dec_hid_dim, dec_layers, dropout, pad_idx):
-        super().__init__()
-        self.embedding = nn.Embedding(output_dim, emb_dim, padding_idx=pad_idx)
-        self.lstm = nn.LSTM(emb_dim, dec_hid_dim, num_layers=dec_layers,
-                            batch_first=True, dropout=dropout if dec_layers>1 else 0.0)
-        self.fc_out = nn.Linear(dec_hid_dim, output_dim)
-    def forward(self, input, hidden, cell):
-        embedded = self.embedding(input)
-        output, (hidden, cell) = self.lstm(embedded, (hidden, cell))
-        prediction = self.fc_out(output)
-        return prediction, hidden, cell
-
-class Seq2Seq(nn.Module):
-    def __init__(self, encoder, decoder, enc_hid_dim, dec_hid_dim):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder = decoder
-        self.fc_hidden = nn.Linear(enc_hid_dim, dec_hid_dim)
-        self.fc_cell = nn.Linear(enc_hid_dim, dec_hid_dim)
-
-    def forward(self, src, tgt):
-        encoder_outputs, enc_hidden, enc_cell = self.encoder(src)
-        n_slices, bsz, enc_hid_dim = enc_hidden.size()
-        hidden_flat = enc_hidden.view(-1, enc_hid_dim)
-        cell_flat = enc_cell.view(-1, enc_hid_dim)
-        hidden_proj = torch.tanh(self.fc_hidden(hidden_flat)).view(n_slices, bsz, -1)
-        cell_proj = torch.tanh(self.fc_cell(cell_flat)).view(n_slices, bsz, -1)
-
-        dec_layers = self.decoder.lstm.num_layers
-        if hidden_proj.size(0) != dec_layers:
-            if hidden_proj.size(0) < dec_layers:
-                reps = math.ceil(dec_layers / hidden_proj.size(0))
-                hidden_proj = hidden_proj.repeat(reps, 1, 1)[:dec_layers]
-                cell_proj = cell_proj.repeat(reps, 1, 1)[:dec_layers]
-            else:
-                hidden_proj = hidden_proj[:dec_layers]
-                cell_proj = cell_proj[:dec_layers]
-
-        output, hidden_dec, cell_dec = self.decoder(tgt, hidden_proj, cell_proj)
-        return output
-
-# --------- load tokenizers ----------
-def safe_load_tokenizer(vocab_path, merges_path):
-    if not os.path.exists(vocab_path) or not os.path.exists(merges_path):
-        raise FileNotFoundError(f"Tokenizer files not found: {vocab_path}, {merges_path}")
-    return ByteLevelBPETokenizer(vocab_path, merges_path)
-
-tokenizer_roman = safe_load_tokenizer(TOKENIZER_ROMAN_VOCAB, TOKENIZER_ROMAN_MERGES)
-tokenizer_urdu  = safe_load_tokenizer(TOKENIZER_URDU_VOCAB, TOKENIZER_URDU_MERGES)
-
-pad_id = tokenizer_roman.token_to_id("<pad>") if tokenizer_roman.token_to_id("<pad>") is not None else 0
-sos_id = tokenizer_roman.token_to_id("<sos>") if tokenizer_roman.token_to_id("<sos>") is not None else tokenizer_roman.token_to_id("<s>")
-eos_id = tokenizer_roman.token_to_id("<eos>") if tokenizer_roman.token_to_id("<eos>") is not None else tokenizer_roman.token_to_id("</s>")
-src_pad_id = tokenizer_urdu.token_to_id("<pad>") if tokenizer_urdu.token_to_id("<pad>") is not None else 0
-
-INPUT_DIM = tokenizer_urdu.get_vocab_size()
-OUTPUT_DIM = tokenizer_roman.get_vocab_size()
-
-# --------- instantiate model and load weights ----------
-enc = Encoder(INPUT_DIM, EMBEDDING_DIM, ENC_HID_DIM, ENC_LAYERS, 0.2, src_pad_id).to(device)
-dec = Decoder(OUTPUT_DIM, EMBEDDING_DIM, DEC_HID_DIM, DEC_LAYERS, 0.2, pad_id).to(device)
-model = Seq2Seq(enc, dec, ENC_HID_DIM, DEC_HID_DIM).to(device)
-
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"Model checkpoint not found: {MODEL_PATH}")
-
-state = torch.load(MODEL_PATH, map_location=device)
-model.load_state_dict(state)
-model.eval()
-
-# --------- helpers ----------
-def decode_ids_to_text(tokenizer, ids, pad_id=pad_id, eos_id=eos_id):
-    clean_ids = [int(i) for i in ids if int(i) != pad_id]
+# Load model function (cached for performance)
+@st.cache_resource
+def load_model():
     try:
-        txt = tokenizer.decode(clean_ids)
-    except Exception:
-        toks = []
-        for iid in clean_ids:
-            try:
-                toks.append(tokenizer.id_to_token(iid))
-            except Exception:
-                toks.append(str(iid))
-        txt = " ".join(toks)
-    txt = txt.replace("<sos>", "").replace("<eos>", "").strip()
-    return txt
+        # Load vocabularies
+        with open('urdu_vocab.pkl', 'rb') as f:
+            urdu_vocab = pickle.load(f)
 
-def greedy_decode_single(model, src_tensor, max_len=50):
-    # src_tensor: [1, src_len] on device
-    with torch.no_grad():
-        encoder_outputs, enc_hidden, enc_cell = model.encoder(src_tensor)
-        n_slices, bsz, enc_hid_dim = enc_hidden.size()
-        hidden_flat = enc_hidden.view(-1, enc_hid_dim)
-        cell_flat = enc_cell.view(-1, enc_hid_dim)
-        hidden_proj = torch.tanh(model.fc_hidden(hidden_flat)).view(n_slices, bsz, -1)
-        cell_proj = torch.tanh(model.fc_cell(cell_flat)).view(n_slices, bsz, -1)
+        with open('roman_vocab.pkl', 'rb') as f:
+            roman_vocab = pickle.load(f)
 
-        dec_layers = model.decoder.lstm.num_layers
-        if hidden_proj.size(0) != dec_layers:
-            if hidden_proj.size(0) < dec_layers:
-                reps = math.ceil(dec_layers / hidden_proj.size(0))
-                hidden_proj = hidden_proj.repeat(reps, 1, 1)[:dec_layers]
-                cell_proj = cell_proj.repeat(reps, 1, 1)[:dec_layers]
-            else:
-                hidden_proj = hidden_proj[:dec_layers]
-                cell_proj = cell_proj[:dec_layers]
+        # Load model checkpoint
+        checkpoint = torch.load('best_model.pth', map_location='cpu')
 
-        input_tok = torch.tensor([[sos_id]], dtype=torch.long).to(device)
-        hidden, cell = hidden_proj, cell_proj
-        preds = []
-        for _ in range(max_len):
-            out, hidden, cell = model.decoder(input_tok, hidden, cell)   # out: [1,1,vocab]
-            next_tok = out.argmax(2)  # [1,1]
-            preds.append(next_tok.cpu().numpy()[0,0])
-            input_tok = next_tok
-        return preds
+        # Load experiment results if available
+        experiment_results = None
+        if os.path.exists('experiment_results.json'):
+            with open('experiment_results.json', 'r', encoding='utf-8') as f:
+                experiment_results = json.load(f)
 
-# --------- Streamlit UI ----------
-st.title("Urdu → Roman Urdu Transliteration (Demo)")
-st.write("Type an Urdu sentence below and click Translate.")
+        # Recreate model architecture
+        class Encoder(nn.Module):
+            def __init__(self, input_dim, embed_dim, hidden_dim, num_layers=2, dropout=0.3):
+                super().__init__()
+                self.hidden_dim = hidden_dim
+                self.num_layers = num_layers
+                self.embedding = nn.Embedding(input_dim, embed_dim, padding_idx=0)
+                self.lstm = nn.LSTM(
+                    embed_dim, hidden_dim, num_layers=num_layers,
+                    dropout=dropout if num_layers > 1 else 0,
+                    bidirectional=True, batch_first=True
+                )
+                self.dropout = nn.Dropout(dropout)
 
-input_text = st.text_area("Urdu text", height=120)
-if st.button("Translate"):
-    if not input_text.strip():
-        st.warning("Please enter some Urdu text.")
-    else:
-        # encode + pad
-        enc = tokenizer_urdu.encode(input_text).ids
-        if len(enc) > MAX_LEN_SRC:
-            enc = enc[:MAX_LEN_SRC]
+            def forward(self, src):
+                embedded = self.dropout(self.embedding(src))
+                outputs, (hidden, cell) = self.lstm(embedded)
+                return outputs, hidden, cell
+
+        class Decoder(nn.Module):
+            def __init__(self, output_dim, embed_dim, hidden_dim, num_layers=4, dropout=0.3):
+                super().__init__()
+                self.output_dim = output_dim
+                self.hidden_dim = hidden_dim
+                self.num_layers = num_layers
+                self.embedding = nn.Embedding(output_dim, embed_dim, padding_idx=0)
+                self.lstm = nn.LSTM(
+                    embed_dim, hidden_dim * 2, num_layers=num_layers,
+                    dropout=dropout if num_layers > 1 else 0,
+                    batch_first=True
+                )
+                self.fc_out = nn.Linear(hidden_dim * 2, output_dim)
+                self.dropout = nn.Dropout(dropout)
+
+            def forward(self, input, hidden, cell):
+                input = input.unsqueeze(1)
+                embedded = self.dropout(self.embedding(input))
+                output, (hidden, cell) = self.lstm(embedded, (hidden, cell))
+                prediction = self.fc_out(output.squeeze(1))
+                return prediction, hidden, cell
+
+        class Seq2Seq(nn.Module):
+            def __init__(self, encoder, decoder, device):
+                super().__init__()
+                self.encoder = encoder
+                self.decoder = decoder
+                self.device = device
+
+            def forward(self, src, trg, teacher_forcing_ratio=0):
+                batch_size = src.shape[0]
+                trg_len = trg.shape[1]
+                trg_vocab_size = self.decoder.output_dim
+
+                outputs = torch.zeros(batch_size, trg_len, trg_vocab_size).to(self.device)
+                _, hidden, cell = self.encoder(src)
+
+                # Convert bidirectional states
+                hidden = hidden.view(self.encoder.num_layers, 2, batch_size, -1)
+                hidden = torch.cat([hidden[:, 0, :, :], hidden[:, 1, :, :]], dim=2)
+                cell = cell.view(self.encoder.num_layers, 2, batch_size, -1)
+                cell = torch.cat([cell[:, 0, :, :], cell[:, 1, :, :]], dim=2)
+
+                # Pad for decoder layers if needed
+                if self.decoder.num_layers > hidden.shape[0]:
+                    padding_layers = self.decoder.num_layers - hidden.shape[0]
+                    hidden = torch.cat([hidden, torch.zeros(padding_layers, batch_size, hidden.shape[2])], dim=0)
+                    cell = torch.cat([cell, torch.zeros(padding_layers, batch_size, cell.shape[2])], dim=0)
+
+                input = trg[:, 0]
+                for t in range(1, trg_len):
+                    output, hidden, cell = self.decoder(input, hidden, cell)
+                    outputs[:, t] = output
+                    top1 = output.argmax(1)
+                    input = top1
+
+                return outputs
+
+        # Initialize model
+        device = torch.device('cpu')
+        encoder = Encoder(**checkpoint['encoder_config'])
+        decoder = Decoder(**checkpoint['decoder_config'])
+        model = Seq2Seq(encoder, decoder, device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.eval()
+
+        return model, urdu_vocab, roman_vocab, experiment_results
+
+    except Exception as e:
+        st.error(f"Error loading model: {str(e)}")
+        return None, None, None, None
+
+# Helper functions
+def clean_urdu_text(text):
+    """Clean Urdu text - preserve Urdu Unicode characters"""
+    text = str(text)
+    # Urdu Unicode range: \u0600-\u06FF
+    text = re.sub(r'[^\u0600-\u06FF\s.,!?;\'"\-]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def clean_roman_text(text):
+    """Clean Roman Urdu text"""
+    text = str(text).lower()
+    text = re.sub(r'[^a-z0-9\s.,!?;\'"\-]', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def encode_sequence(text, vocab, max_len=50):
+    """Encode text to indices with padding"""
+    # Add SOS and EOS tokens
+    tokens = ['<sos>'] + list(text) + ['<eos>']
+    
+    # Convert to indices
+    indices = []
+    for token in tokens:
+        if token in vocab:
+            indices.append(vocab[token])
         else:
-            enc = enc + [src_pad_id] * (MAX_LEN_SRC - len(enc))
-        src_tensor = torch.tensor([enc], dtype=torch.long).to(device)
-        pred_ids = greedy_decode_single(model, src_tensor, max_len=MAX_LEN_TGT)
-        pred_text = decode_ids_to_text(tokenizer_roman, pred_ids, pad_id, eos_id)
-        st.subheader("Predicted Roman Urdu")
-        st.write(pred_text)
+            indices.append(vocab.get('<unk>', 0))
+    
+    # Truncate or pad
+    if len(indices) > max_len:
+        indices = indices[:max_len]
+        indices[-1] = vocab['<eos>']
+    else:
+        indices = indices + [vocab['<pad>']] * (max_len - len(indices))
+    
+    return indices
 
-st.caption("Make sure `best_model.pt` and the `tokenizers/` folder are in the same directory as this app.py.")
+def translate_text(text, model, urdu_vocab, roman_vocab, max_len=50):
+    """Translate a single Urdu sentence to Roman Urdu"""
+    if not text.strip():
+        return ""
+    
+    # Clean input
+    cleaned = clean_urdu_text(text)
+    if not cleaned:
+        return "[Error: No valid Urdu text found]"
+    
+    # Encode
+    encoded = encode_sequence(cleaned, urdu_vocab, max_len)
+    src_tensor = torch.tensor(encoded).unsqueeze(0)
+    
+    # Start with SOS token
+    trg_indices = [roman_vocab['<sos>']]
+    
+    with torch.no_grad():
+        # Encode
+        _, hidden, cell = model.encoder(src_tensor)
+        
+        # Convert bidirectional states
+        hidden = hidden.view(model.encoder.num_layers, 2, 1, -1)
+        hidden = torch.cat([hidden[:, 0, :, :], hidden[:, 1, :, :]], dim=2)
+        cell = cell.view(model.encoder.num_layers, 2, 1, -1)
+        cell = torch.cat([cell[:, 0, :, :], cell[:, 1, :, :]], dim=2)
+        
+        # Pad for decoder layers if needed
+        if model.decoder.num_layers > hidden.shape[0]:
+            padding_layers = model.decoder.num_layers - hidden.shape[0]
+            hidden = torch.cat([hidden, torch.zeros(padding_layers, 1, hidden.shape[2])], dim=0)
+            cell = torch.cat([cell, torch.zeros(padding_layers, 1, cell.shape[2])], dim=0)
+        
+        # Decode step by step
+        for _ in range(max_len - 1):
+            trg_tensor = torch.tensor([trg_indices[-1]])
+            output, hidden, cell = model.decoder(trg_tensor, hidden, cell)
+            
+            pred_token = output.argmax(1).item()
+            trg_indices.append(pred_token)
+            
+            if pred_token == roman_vocab['<eos>']:
+                break
+    
+    # Convert indices to text
+    idx_to_char = {v: k for k, v in roman_vocab.items()}
+    translated_chars = []
+    for idx in trg_indices[1:]:  # Skip SOS
+        if idx == roman_vocab['<eos>'] or idx == roman_vocab['<pad>'] or idx == roman_vocab.get('<unk>', 0):
+            break
+        char = idx_to_char.get(idx, '')
+        if char not in ['<sos>', '<eos>', '<pad>', '<unk>']:
+            translated_chars.append(char)
+    
+    return ''.join(translated_chars)
+
+# Initialize session state
+if 'translation' not in st.session_state:
+    st.session_state.translation = ""
+if 'show_result' not in st.session_state:
+    st.session_state.show_result = False
+if 'examples' not in st.session_state:
+    st.session_state.examples = [
+        "اس آہٹ سے کوئی آیا تو لگتا ہے",
+        "موج گل موج صبا موج سحر لگتی ہے",
+        "ہر ایک روح میں ایک غم چھپا لگے ہیں",
+        "دل کو توڑنا بھی کوئی ہنر نہیں ہے",
+        "محبت میں نہیں ہے فرق جینے اور مرنے کا",
+        "اردو ایک خوبصورت زبان ہے",
+        "پاکستان زندہ باد",
+        "سلام علیکم، آپ کیسے ہیں؟"
+    ]
+
+# Sidebar for model info
+with st.sidebar:
+    st.markdown("### 🏛️ Model Information")
+    st.markdown("""
+    **Architecture:**
+    - Encoder: 2-layer Bidirectional LSTM
+    - Decoder: 4-layer LSTM
+    
+    **Training Data:**
+    - 1,314 Urdu-Roman Urdu pairs
+    - Character-level tokenization
+    """)
+    
+    # Load model info (cached)
+    model, urdu_vocab, roman_vocab, experiment_results = load_model()
+    
+    if experiment_results and len(experiment_results) > 0:
+        st.markdown("**Best Experiment Results:**")
+        best_result = experiment_results[0]
+        for res in experiment_results:
+            if res.get('test_bleu', 0) > best_result.get('test_bleu', 0):
+                best_result = res
+        
+        st.markdown(f"""
+        - **BLEU Score:** {best_result.get('test_bleu', 0):.4f}
+        - **Character Error Rate:** {best_result.get('test_cer', 0):.4f}
+        - **Perplexity:** {best_result.get('test_perplexity', 0):.2f}
+        - **Loss:** {best_result.get('test_loss', 0):.4f}
+        """)
+    
+    st.markdown("---")
+    st.markdown("### 📖 How to Use")
+    st.markdown("""
+    1. Enter Urdu text in the text area
+    2. Click the 'Translate' button
+    3. View the Roman Urdu translation
+    4. Try the example buttons for quick testing
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 🚀 Project Info")
+    st.markdown("""
+    **Project:** Urdu to Roman Urdu NMT  
+    **Course:** Neural Machine Translation Assignment  
+    **Dataset:** Urdu-Roman Urdu Parallel Corpus  
+    **Framework:** PyTorch  
+    **Deployment:** Streamlit  
+    **Model Type:** Character-level Seq2Seq
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 📊 Model Statistics")
+    if model:
+        total_params = sum(p.numel() for p in model.parameters())
+        st.markdown(f"**Total Parameters:** {total_params:,}")
+    
+    if urdu_vocab and roman_vocab:
+        st.markdown(f"**Urdu Vocabulary:** {len(urdu_vocab)} chars")
+        st.markdown(f"**Roman Vocabulary:** {len(roman_vocab)} chars")
+
+# Main content
+col1, col2 = st.columns([3, 2])
+
+with col1:
+    st.markdown("### 📝 Enter Urdu Text")
+    
+    # Example buttons in a grid
+    st.markdown("**Try these examples:**")
+    cols = st.columns(4)
+    for i, example in enumerate(st.session_state.examples):
+        with cols[i % 4]:
+            if st.button(f"Example {i+1}", key=f"ex_{i}", use_container_width=True):
+                st.session_state.urdu_text = example
+                st.rerun()
+    
+    # Text input area
+    urdu_text = st.text_area(
+        "",
+        height=200,
+        placeholder="اردو متن درج کریں... (Type or paste Urdu text here)",
+        key="urdu_text",
+        help="Type or paste Urdu text in Perso-Arabic script"
+    )
+    
+    # Translation controls
+    col1a, col1b = st.columns([3, 1])
+    with col1a:
+        translate_button = st.button("🚀 Translate", type="primary", use_container_width=True)
+    with col1b:
+        if st.button("🔄 Clear", use_container_width=True):
+            st.session_state.urdu_text = ""
+            st.session_state.translation = ""
+            st.session_state.show_result = False
+            st.rerun()
+    
+    if translate_button:
+        if urdu_text and urdu_text.strip():
+            with st.spinner("Translating... Please wait"):
+                if model and urdu_vocab and roman_vocab:
+                    translation = translate_text(urdu_text, model, urdu_vocab, roman_vocab)
+                    st.session_state.translation = translation
+                    st.session_state.show_result = True
+                    st.rerun()
+                else:
+                    st.error("❌ Model failed to load. Please check if model files exist.")
+        else:
+            st.warning("⚠️ Please enter some Urdu text to translate")
+
+with col2:
+    st.markdown("### 🔤 Translation Results")
+    
+    if st.session_state.show_result and st.session_state.translation:
+        st.markdown('<div class="result-box">', unsafe_allow_html=True)
+        st.markdown("**Roman Urdu Translation:**")
+        
+        # Display translation in a nice box
+        st.code(st.session_state.translation, language='text')
+        
+        # Show input text (cleaned)
+        cleaned_input = clean_urdu_text(st.session_state.get('urdu_text', ''))
+        if cleaned_input:
+            with st.expander("View Input Text"):
+                st.text(cleaned_input)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Show translation stats
+        if st.session_state.translation:
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+                st.metric("Characters", len(st.session_state.translation))
+                st.markdown('</div>', unsafe_allow_html=True)
+            with col_b:
+                st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+                words = len(st.session_state.translation.split())
+                st.metric("Words", words)
+                st.markdown('</div>', unsafe_allow_html=True)
+            with col_c:
+                st.markdown('<div class="metric-box">', unsafe_allow_html=True)
+                st.metric("Status", "✅ Complete")
+                st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Copy to clipboard functionality
+        if st.button("📋 Copy Translation", use_container_width=True):
+            # For Streamlit, we can use a workaround
+            st.code(st.session_state.translation, language='text')
+            st.success("✅ Translation ready to copy! Select the text above and copy it.")
+        
+        # Additional options
+        with st.expander("⚙️ Advanced Options"):
+            st.markdown("**Translation Settings:**")
+            max_len = st.slider("Maximum Translation Length", 20, 100, 50)
+            st.markdown("**Note:** Changing settings requires re-translation.")
+            
+            if st.button("🔄 Re-translate with Settings", use_container_width=True):
+                with st.spinner("Re-translating..."):
+                    if model and urdu_vocab and roman_vocab:
+                        translation = translate_text(
+                            st.session_state.get('urdu_text', ''), 
+                            model, urdu_vocab, roman_vocab, max_len
+                        )
+                        st.session_state.translation = translation
+                        st.rerun()
+    
+    elif st.session_state.show_result and not st.session_state.translation:
+        st.warning("⚠️ Translation returned empty. The input might not contain valid Urdu text.")
+    
+    else:
+        st.info("👈 Enter Urdu text on the left and click 'Translate' to see results here")
+        
+        # Quick info box
+        st.markdown("""
+        <div style="background-color: #f0f9ff; padding: 1rem; border-radius: 10px; border-left: 5px solid #0ea5e9;">
+        <h4>💡 Tips for Best Results:</h4>
+        <ul style="margin-bottom: 0;">
+        <li>Use standard Urdu script (Perso-Arabic)</li>
+        <li>Avoid mixed language text</li>
+        <li>Keep sentences under 50 characters for best accuracy</li>
+        <li>Use the example buttons to see how it works</li>
+        </ul>
+        </div>
+        """, unsafe_allow_html=True)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #6B7280; font-size: 0.9rem;">
+    <p>🕌 <b>Urdu to Roman Urdu Neural Machine Translation System</b></p>
+    <p>Built with PyTorch & Streamlit • Character-level Seq2Seq Model</p>
+    <p style="font-size: 0.8rem; margin-top: 1rem;">
+        <i>Note: This is a research model. Translation quality may vary based on input text.</i>
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+# Add a section for model troubleshooting
+with st.expander("🔧 Troubleshooting & Model Info"):
+    st.markdown("""
+    **Common Issues:**
+    
+    1. **"Model failed to load" error:**
+       - Ensure `best_model.pth`, `urdu_vocab.pkl`, and `roman_vocab.pkl` are in the same directory as app.py
+       - Check file permissions
+    
+    2. **Empty translations:**
+       - Input might contain non-Urdu characters
+       - Try the example sentences first
+    
+    3. **Poor translation quality:**
+       - This is a character-level model with limited training data
+       - Complex or long sentences may not translate accurately
+    
+    **Model Files Required:**
+    - `best_model.pth` - Trained PyTorch model
+    - `urdu_vocab.pkl` - Urdu character vocabulary
+    - `roman_vocab.pkl` - Roman Urdu character vocabulary
+    - `experiment_results.json` - Optional, for performance metrics
+    
+    **For Developers:**
+    - Source: [GitHub Repository](https://github.com/bismatayyab23-tech/urdu-roman-nmt)
+    - Model: 2-layer BiLSTM encoder, 4-layer LSTM decoder
+    - Training: 1,314 Urdu-Roman Urdu sentence pairs
+    - Tokenization: Character-level
+    """)
+
+# Add a debug section (hidden by default)
+if st.sidebar.checkbox("Show Debug Info", False):
+    st.sidebar.markdown("### 🐛 Debug Information")
+    st.sidebar.write(f"Session State: {dict(st.session_state)}")
+    if model:
+        st.sidebar.write(f"Model loaded: {model is not None}")
+    if urdu_vocab:
+        st.sidebar.write(f"Urdu vocab size: {len(urdu_vocab)}")
+    if roman_vocab:
+        st.sidebar.write(f"Roman vocab size: {len(roman_vocab)}")
