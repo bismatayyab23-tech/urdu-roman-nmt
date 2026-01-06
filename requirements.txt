@@ -1,3 +1,30 @@
-torch
-tokenizers
-streamlit
+# Core dependencies
+streamlit==1.28.0
+torch==2.0.1
+numpy==1.24.3
+pandas==2.0.3
+
+# For running the notebook (optional for deployment)
+jupyter==1.0.0
+notebook==6.5.4
+ipython==8.14.0
+
+# Data processing and model training dependencies
+scikit-learn==1.3.0
+nltk==3.8.1
+editdistance==0.6.2
+matplotlib==3.7.2
+seaborn==0.12.2
+
+# Development utilities
+tqdm==4.65.0
+pillow==10.0.0
+python-dotenv==1.0.0
+black==23.7.0
+flake8==6.0.0
+
+# For Windows users (if needed)
+# pywin32==306
+
+# For Mac/Linux users
+# No additional requirements
